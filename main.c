@@ -3,15 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <X11/extensions/XInput2.h>
-#define KBD_DEV_ID 3
 
 Bool
 chckXI2Ext (Display * dpy,
-            int     * xi_opcode)
+            int     * xiOp)
 {
     int event, error, major, minor, rc;
 
-    if (XQueryExtension (dpy, "XInputExtension", xi_opcode, &event, &error) == 0)
+    if (XQueryExtension (dpy, "XInputExtension", xiOp, &event, &error) == 0)
     {
         printf ("X Input extension not available.\n");
         return False;
@@ -34,85 +33,216 @@ chckXI2Ext (Display * dpy,
     return True;
 }
 
-void
-grab_key (Display * dpy,
-          Window    win,
-          int     * xi_opcode)
+Bool
+grabKey (Display         * xDisplay,
+         Window            w,
+         KeyCode           xKCode,
+         int               nDevs,
+         int             * devs,
+         int               nMods,
+         XIGrabModifiers * mods)
 {
-    XIGrabModifiers       modifiers[4], failed_modifiers[4];
-    XEvent                ev;
-    XIEventMask           evmask;
-    XGenericEventCookie * cookie;
-    XIDeviceEvent       * xide;
-    KeySym              * keysym;
-    KeyCode               TransCtrlKC, ExitCtrlKC;
-    int                   keysym_count, kc, nmodifiers, failed_nmodifiers;
-    unsigned char         mask[(XI_LASTEVENT + 7) / 8];
+    XIGrabModifiers * failMods;
+    XIEventMask       evmask;
+    int               nfailMods, i;
+    unsigned char     mask[(XI_LASTEVENT + 7) / 8];
 
-    TransCtrlKC = XKeysymToKeycode (dpy, XStringToKeysym ("u"));
-    ExitCtrlKC  = XKeysymToKeycode (dpy, XStringToKeysym ("g"));
+    failMods = (XIGrabModifiers*) malloc (sizeof (XIGrabModifiers) * nMods);
+
+    memcpy (failMods, mods, sizeof (XIGrabModifiers) * nMods);
 
     memset (mask, 0, sizeof (mask));
     XISetMask (mask, XI_KeyRelease);
     XISetMask (mask, XI_KeyPress);
 
-    evmask.mask_len        = sizeof (mask);
-    evmask.mask            = mask;
+    memset (&evmask, 0, sizeof (evmask));
+    evmask.mask_len = sizeof (mask);
+    evmask.mask     = mask;
 
-    nmodifiers             = 4;
+    nfailMods = 0;
+
+    for (i = 0; i < nDevs && nfailMods == 0; ++i)
+    {
+        nfailMods = XIGrabKeycode (xDisplay, devs[i], xKCode, w, GrabModeAsync,
+                                   GrabModeAsync, False, &evmask, nMods,
+                                   failMods);
+    }
+
+    if (nfailMods != 0)
+    {
+        for (i = 0; i < nfailMods; ++i)
+        {
+            printf ("Modifier %x failed with error %d\n", failMods[i].modifiers,
+                    failMods[i].status);
+        }
+
+        free (failMods);
+
+        return False;
+    }
+
+    printf ("\tsuccess!\n\n");
+
+    free (failMods);
+
+    return True;
+}
+
+void
+ungrabKey (Display         * dpy,
+           Window            win,
+           KeyCode           xKCode,
+           int               nDevs,
+           int             * devs,
+           int               nMods,
+           XIGrabModifiers * mods)
+{
+    for (int i = 0; i < nDevs; ++i)
+    {
+        XIUngrabKeycode (dpy, devs[i], xKCode, win, nMods, mods);
+    }
+}
+
+int
+main (void)
+{
+    Display             * dpy;
+    Window                root;
+    int                   xiOp, stop, keysym_count, kc, nMods, * kbds, nDevs;
+    int                   nKbds;
+    KeyCode               TransCtrlKC, ExitCtrlKC;
+    KeySym              * keysym;
+    XGenericEventCookie * cookie;
+    XIDeviceEvent       * xide;
+    XEvent                ev;
+    XIDeviceInfo        * device_info;
+
+
+    /**************************************************************************/
+    /*start connection with x server*/
+    /**************************************************************************/
+    dpy        = XOpenDisplay (NULL);
+    if (dpy == NULL)
+    {
+        printf ("Cannot open default display\n!");
+        return EXIT_FAILURE;
+    }
+    root       = DefaultRootWindow (dpy);
+    /**************************************************************************/
+
+
+    /**************************************************************************/
+    /*check XInput2 extension availability and its version*/
+    /**************************************************************************/
+    if (chckXI2Ext (dpy, &xiOp) == False)
+    {
+        XCloseDisplay (dpy);
+        return EXIT_FAILURE;
+    }
+    /**************************************************************************/
+
+
+    /**************************************************************************/
+    /*get master keyboard count and IDs*/
+    /**************************************************************************/
+    nDevs       = 0;
+    nKbds       = 0;
+    kbds        = NULL;
+    device_info = XIQueryDevice (dpy, XIAllMasterDevices, &nDevs);
+
+    if (device_info != NULL)
+    {
+        kbds = (int*) malloc (sizeof (int) * nDevs);
+
+        for (int i = 0; i < nDevs; ++i)
+        {
+            if (device_info[i].use == XIMasterKeyboard)
+            {
+                kbds[nKbds] = device_info[i].deviceid;
+                ++nKbds;
+            }
+        }
+
+        XIFreeDeviceInfo (device_info);
+    }
+    else
+    {
+        printf ("Cannot get master device list!\n");
+        XCloseDisplay (dpy);
+        return EXIT_FAILURE;
+    }
+    /**************************************************************************/
+
+
+    /**************************************************************************/
+    /*prepare modifiers*/
+    /**************************************************************************/
+    nMods = 4;
+
+    XIGrabModifiers modifiers[4];
 
     modifiers[0].modifiers = ShiftMask | ControlMask;
     modifiers[1].modifiers = ShiftMask | ControlMask | LockMask;
     modifiers[2].modifiers = ShiftMask | ControlMask | Mod2Mask;
     modifiers[3].modifiers = ShiftMask | ControlMask | Mod2Mask  | LockMask;
+    /**************************************************************************/
 
-    memcpy (failed_modifiers, modifiers, sizeof (modifiers));
 
+    /**************************************************************************/
+    /*get keycodes*/
+    /**************************************************************************/
+    TransCtrlKC = XKeysymToKeycode (dpy, XStringToKeysym ("u"));
+    ExitCtrlKC  = XKeysymToKeycode (dpy, XStringToKeysym ("g"));
+    /**************************************************************************/
+
+
+    /**************************************************************************/
+    /*Grab translation control key*/
+    /**************************************************************************/
     printf ("Grabbing keycode %d (usually %s) with CTRL + SHIFT modifiers\n",
             TransCtrlKC, "u");
 
-    failed_nmodifiers = XIGrabKeycode (dpy, KBD_DEV_ID, TransCtrlKC, win,
-                                       GrabModeAsync, GrabModeAsync, False,
-                                       &evmask, nmodifiers, failed_modifiers);
-
-    if (failed_nmodifiers != 0)
+    if (grabKey (dpy, root, TransCtrlKC, nKbds, kbds, nMods, modifiers)
+        == False)
     {
-        int i;
-        for (i = 0; i < failed_nmodifiers; i++)
-        {
-            printf ("Modifier %x failed with error %d\n",
-                    failed_modifiers[i].modifiers, failed_modifiers[i].status);
-        }
-        return ;
+        free (kbds);
+        XCloseDisplay (dpy);
+        return EXIT_FAILURE;
     }
+    /**************************************************************************/
 
+
+    /**************************************************************************/
+    /*Grab exit key*/
+    /**************************************************************************/
     printf ("Grabbing keycode %d (usually %s) with CTRL + SHIFT modifiers\n",
-            TransCtrlKC, "g");
+            ExitCtrlKC, "g");
 
-    failed_nmodifiers = XIGrabKeycode (dpy, KBD_DEV_ID, ExitCtrlKC, win,
-                                       GrabModeAsync, GrabModeAsync, False,
-                                       &evmask, nmodifiers, failed_modifiers);
-
-    if (failed_nmodifiers != 0)
+    if (grabKey (dpy, root, ExitCtrlKC, nKbds, kbds, nMods, modifiers)
+        == False)
     {
-        int i;
-        for (i = 0; i < failed_nmodifiers; i++)
-        {
-            printf ("Modifier %x failed with error %d\n",
-                    failed_modifiers[i].modifiers, failed_modifiers[i].status);
-        }
-        return ;
+        ungrabKey (dpy, root, TransCtrlKC, nKbds, kbds, nMods, modifiers);
+        free (kbds);
+        XCloseDisplay (dpy);
+        return EXIT_FAILURE;
     }
+    /**************************************************************************/
 
-    printf ("Waiting for grab to activate now. Press a key.\n");
 
-    while (1)
+    /**************************************************************************/
+    /*Start event processing*/
+    /**************************************************************************/
+    printf ("Waiting for input. Press CTRL + SHIFT + G to quit.\n\n");
+
+    stop = 0;
+
+    while (stop == 0)
     {
         cookie = &ev.xcookie;
         XNextEvent (dpy, &ev);
 
         if (   cookie->type                != GenericEvent
-            || cookie->extension           != *xi_opcode
+            || cookie->extension           != xiOp
             || XGetEventData (dpy, cookie) == 0)
         {
             continue;
@@ -124,42 +254,28 @@ grab_key (Display * dpy,
         kc = XKeysymToKeycode (dpy, *keysym);
         XFree (keysym);
 
-        if (kc == 30 && cookie->evtype == XI_KeyRelease)
+        if (kc == TransCtrlKC && cookie->evtype == XI_KeyRelease)
         {
             printf ("CTRL + SHIFT + U\n");
         }
 
-        if (kc == 42 && cookie->evtype == XI_KeyRelease)
+        if (kc == ExitCtrlKC && cookie->evtype == XI_KeyRelease)
         {
             printf ("CTRL + SHIFT + G\n");
+            stop = 1;
         }
 
         XFreeEventData (dpy, cookie);
     }
+    /**************************************************************************/
 
-    XIUngrabKeycode (dpy, KBD_DEV_ID, TransCtrlKC, win, nmodifiers, modifiers);
-    XIUngrabKeycode (dpy, KBD_DEV_ID, ExitCtrlKC, win, nmodifiers, modifiers);
-}
 
-int
-main (void)
-{
-    Display         * dpy;
-    Window            root;
-    int               xi_opcode;
-
-    dpy        = XOpenDisplay (NULL);
-    root       = DefaultRootWindow (dpy);
-
-    if (chckXI2Ext (dpy, &xi_opcode) == False)
-    {
-        return EXIT_FAILURE;
-    }
-
-    grab_key (dpy, root, &xi_opcode);
+    ungrabKey (dpy, root, TransCtrlKC, nKbds, kbds, nMods, modifiers);
+    ungrabKey (dpy, root, ExitCtrlKC, nKbds, kbds, nMods, modifiers);
 
     XCloseDisplay (dpy);
 
+    free (kbds);
 
     return EXIT_SUCCESS;
 }
