@@ -1,4 +1,4 @@
-/*gcc -lX11 -lXi*/
+/*gcc -std=c11 -lX11 -lXi*/
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
