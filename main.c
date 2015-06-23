@@ -3,30 +3,75 @@
 #include <stdlib.h>
 #include <string.h>
 #include <X11/extensions/XInput2.h>
+#define LOG_LVL_NO 0
+#define LOG_LVL_2 2
+
+struct context_
+{
+    Display * xDpy;
+    int       xiOp;
+} ;
+
+typedef struct context_ XWCContext;
+
+struct DevList_
+{
+    int * devs;
+    int   nDevs;
+} ;
+
+typedef struct DevList_ DevList;
+
+void
+logCtr (const char * buf, int log_lvl, Bool l)
+{
+    if (! buf)
+    {
+        return;
+    }
+    if (log_lvl)
+    {
+        return;
+    }
+    if (! l)
+    {
+        return;
+    }
+}
 
 Bool
-chckXI2Ext (Display * dpy,
-            int     * xiOp)
+chckXI2Ext (XWCContext * ctx)
 {
     int event, error, major, minor, rc;
+    char buf[1024];
 
-    if (XQueryExtension (dpy, "XInputExtension", xiOp, &event, &error) == 0)
+    if (ctx == NULL)
     {
-        printf ("X Input extension not available.\n");
+        logCtr ("Cannot check XInput 2 extension: NULL pointer to XWC context"
+                " received.", LOG_LVL_NO, False);
+        return False;
+    }
+
+    if (XQueryExtension (ctx->xDpy, "XInputExtension", &ctx->xiOp, &event,
+                         &error) == 0)
+    {
+        logCtr ("X Input extension not available.", LOG_LVL_NO, False);
         return False;
     }
 
     major = 2;
     minor = 0;
 
-    if ((rc = XIQueryVersion (dpy, &major, &minor)) == BadRequest)
+    if ((rc = XIQueryVersion (ctx->xDpy, &major, &minor)) == BadRequest)
     {
-        printf ("XI2 not available. Server supports %d.%d\n", major, minor);
+        snprintf (buf, sizeof (buf), "XI2 not available. Server supports %d.%d",
+                  major, minor);
+        logCtr (buf,  LOG_LVL_NO, False);
         return False;
     }
     else if (rc != Success)
     {
-        printf ("Xlib internal error!\n");
+        logCtr ("Xlib internal error!", LOG_LVL_NO, False);
         return False;
     }
 
@@ -34,20 +79,85 @@ chckXI2Ext (Display * dpy,
 }
 
 Bool
-grabKey (Display         * xDisplay,
-         Window            w,
-         KeyCode           xKCode,
-         int               nDevs,
-         int             * devs,
-         int               nMods,
-         XIGrabModifiers * mods)
+grabKeyCtrl (XWCContext      * ctx,
+             Window            w,
+             KeyCode           xKCode,
+             DevList         * kbds,
+             int               nMods,
+             XIGrabModifiers * mods,
+             Bool              grab)
 {
     XIGrabModifiers * failMods;
     XIEventMask       evmask;
     int               nfailMods, i;
     unsigned char     mask[(XI_LASTEVENT + 7) / 8];
+    char              buf[1024];
+
+    if (ctx == NULL)
+    {
+        logCtr ("Cannot grab key: NULL pointer to XWC context received.",
+                LOG_LVL_NO, False);
+        return False;
+    }
+
+    if (kbds == NULL)
+    {
+        logCtr ("Cannot grab key: NULL pointer to keyboard device list"
+                " received.", LOG_LVL_NO, False);
+        return False;
+    }
+
+    if (kbds->nDevs < 0 || kbds->nDevs > 127)
+    {
+        logCtr ("Cannot grab key: bad device count.", LOG_LVL_NO, False);
+        return False;
+    }
+
+    if (kbds->devs == NULL)
+    {
+        logCtr ("Cannot grab key: NULL pointer to device array received.",
+                LOG_LVL_NO, False);
+        return False;
+    }
+
+    if (nMods < 0 || nMods > 127)
+    {
+        logCtr ("Cannot grab key: bad mods count.", LOG_LVL_NO, False);
+        return False;
+    }
+
+
+
+    if (mods == NULL)
+    {
+        logCtr ("Cannot grab key: NULL pointer to modifiers array received.",
+                LOG_LVL_NO, False);
+        return False;
+    }
+
+    if (w == None)
+    {
+        logCtr ("Cannot grab key: No window specified.", LOG_LVL_NO, False);
+        return False;
+    }
+
+    if (grab == False)
+    {
+        for (int i = 0; i < kbds->nDevs; ++ i)
+        {
+            XIUngrabKeycode (ctx->xDpy, kbds->devs[i], xKCode, w, nMods, mods);
+        }
+        return True;
+    }
 
     failMods = (XIGrabModifiers*) malloc (sizeof (XIGrabModifiers) * nMods);
+
+    if (failMods == NULL)
+    {
+        logCtr ("Cannot grab key: cannot allocate array for failed mods.",
+                LOG_LVL_NO, False);
+        return False;
+    }
 
     memcpy (failMods, mods, sizeof (XIGrabModifiers) * nMods);
 
@@ -59,21 +169,23 @@ grabKey (Display         * xDisplay,
     evmask.mask_len = sizeof (mask);
     evmask.mask     = mask;
 
-    nfailMods = 0;
+    nfailMods       = 0;
 
-    for (i = 0; i < nDevs && nfailMods == 0; ++i)
+    for (i = 0; i < kbds->nDevs && nfailMods == 0; ++ i)
     {
-        nfailMods = XIGrabKeycode (xDisplay, devs[i], xKCode, w, GrabModeAsync,
-                                   GrabModeAsync, False, &evmask, nMods,
-                                   failMods);
+        nfailMods = XIGrabKeycode (ctx->xDpy, kbds->devs[i], xKCode, w,
+                                   GrabModeAsync, GrabModeAsync, False, &evmask,
+                                   nMods, failMods);
     }
 
     if (nfailMods != 0)
     {
-        for (i = 0; i < nfailMods; ++i)
+        for (i = 0; i < nfailMods; ++ i)
         {
-            printf ("Modifier %x failed with error %d\n", failMods[i].modifiers,
-                    failMods[i].status);
+
+            snprintf (buf, sizeof (buf), "Modifier %x failed with error %d\n",
+                      failMods[i].modifiers, failMods[i].status);
+            logCtr (buf, LOG_LVL_NO, False);
         }
 
         free (failMods);
@@ -81,62 +193,113 @@ grabKey (Display         * xDisplay,
         return False;
     }
 
-    printf ("\tsuccess!\n\n");
+    snprintf (buf, sizeof (buf), "success!");
+    logCtr (buf, LOG_LVL_2, True);
 
     free (failMods);
 
     return True;
 }
 
-void
-ungrabKey (Display         * dpy,
-           Window            win,
-           KeyCode           xKCode,
-           int               nDevs,
-           int             * devs,
-           int               nMods,
-           XIGrabModifiers * mods)
+Bool
+getMasterDevsList (XWCContext *  ctx,
+                   DevList    ** devList,
+                   int           devType)
 {
-    for (int i = 0; i < nDevs; ++i)
+    int          * devs, nResDevs, nAllDevs;
+    XIDeviceInfo * device_info;
+
+    if (ctx == NULL)
     {
-        XIUngrabKeycode (dpy, devs[i], xKCode, win, nMods, mods);
+        logCtr ("Cannot get list of master devices: NULL pointer to program"
+                " context received!", LOG_LVL_NO, False);
+        return False;
     }
+
+    nAllDevs    = 0;
+    nResDevs    = 0;
+    devs        = NULL;
+    device_info = XIQueryDevice (ctx->xDpy, XIAllMasterDevices, &nAllDevs);
+
+    if (device_info != NULL)
+    {
+        devs = (int*) malloc (sizeof (int) * nAllDevs);
+
+        if (devs == NULL)
+        {
+            logCtr ("Cannot get list of master devices: cannot allocate memory"
+                    " for device's id array!", LOG_LVL_NO, False);
+            XIFreeDeviceInfo (device_info);
+            return False;
+        }
+
+        for (int i = 0; i < nAllDevs; ++ i)
+        {
+            if (device_info[i].use == devType)
+            {
+                devs[nResDevs] = device_info[i].deviceid;
+                ++ nResDevs;
+            }
+        }
+
+        XIFreeDeviceInfo (device_info);
+
+        *devList = (DevList *) malloc (sizeof (DevList));
+
+        if (*devList == NULL)
+        {
+            logCtr ("Cannot get list of master devices: Cannot allocate memory"
+                    " for device list!", LOG_LVL_NO, False);
+            free (devs);
+            return False;
+        }
+
+        (*devList)->devs  = devs;
+        (*devList)->nDevs = nResDevs;
+    }
+    else
+    {
+        logCtr ("Cannot get list of master devices: XIQueryDevice error!",
+                LOG_LVL_NO, False);
+        return False;
+    }
+
+    return True;
 }
 
 int
 main (void)
 {
-    Display             * dpy;
     Window                root;
-    int                   xiOp, stop, keysym_count, kc, nMods, * kbds, nDevs;
-    int                   nKbds;
+    int                   stop, keysym_count, kc, nMods;
     KeyCode               TransCtrlKC, ExitCtrlKC;
     KeySym              * keysym;
     XGenericEventCookie * cookie;
     XIDeviceEvent       * xide;
     XEvent                ev;
-    XIDeviceInfo        * device_info;
+    XWCContext            ctx;
+    DevList             * kbds;
 
 
     /**************************************************************************/
     /*start connection with x server*/
     /**************************************************************************/
-    dpy        = XOpenDisplay (NULL);
-    if (dpy == NULL)
+    ctx.xDpy        = XOpenDisplay (NULL);
+    if (ctx.xDpy == NULL)
     {
         printf ("Cannot open default display\n!");
         return EXIT_FAILURE;
     }
-    root       = DefaultRootWindow (dpy);
+    root       = DefaultRootWindow (ctx.xDpy);
     /**************************************************************************/
 
 
     /**************************************************************************/
     /*check XInput2 extension availability and its version*/
     /**************************************************************************/
-    if (chckXI2Ext (dpy, &xiOp) == False)
+    if (chckXI2Ext (&ctx) == False)
     {
-        XCloseDisplay (dpy);
+        XCloseDisplay (ctx.xDpy);
         return EXIT_FAILURE;
     }
     /**************************************************************************/
@@ -145,30 +308,9 @@ main (void)
     /**************************************************************************/
     /*get master keyboard count and IDs*/
     /**************************************************************************/
-    nDevs       = 0;
-    nKbds       = 0;
-    kbds        = NULL;
-    device_info = XIQueryDevice (dpy, XIAllMasterDevices, &nDevs);
-
-    if (device_info != NULL)
+    if (getMasterDevsList (&ctx, &kbds, XIMasterKeyboard) == False)
     {
-        kbds = (int*) malloc (sizeof (int) * nDevs);
-
-        for (int i = 0; i < nDevs; ++i)
-        {
-            if (device_info[i].use == XIMasterKeyboard)
-            {
-                kbds[nKbds] = device_info[i].deviceid;
-                ++nKbds;
-            }
-        }
-
-        XIFreeDeviceInfo (device_info);
-    }
-    else
-    {
-        printf ("Cannot get master device list!\n");
-        XCloseDisplay (dpy);
+        XCloseDisplay (ctx.xDpy);
         return EXIT_FAILURE;
     }
     /**************************************************************************/
@@ -191,8 +333,8 @@ main (void)
     /**************************************************************************/
     /*get keycodes*/
     /**************************************************************************/
-    TransCtrlKC = XKeysymToKeycode (dpy, XStringToKeysym ("u"));
-    ExitCtrlKC  = XKeysymToKeycode (dpy, XStringToKeysym ("g"));
+    TransCtrlKC = XKeysymToKeycode (ctx.xDpy, XStringToKeysym ("u"));
+    ExitCtrlKC  = XKeysymToKeycode (ctx.xDpy, XStringToKeysym ("g"));
     /**************************************************************************/
 
 
@@ -202,11 +344,12 @@ main (void)
     printf ("Grabbing keycode %d (usually %s) with CTRL + SHIFT modifiers\n",
             TransCtrlKC, "u");
 
-    if (grabKey (dpy, root, TransCtrlKC, nKbds, kbds, nMods, modifiers)
+    if (grabKeyCtrl (&ctx, root, TransCtrlKC, kbds, nMods, modifiers, True)
         == False)
     {
+        free (kbds->devs);
         free (kbds);
-        XCloseDisplay (dpy);
+        XCloseDisplay (ctx.xDpy);
         return EXIT_FAILURE;
     }
     /**************************************************************************/
@@ -218,12 +361,13 @@ main (void)
     printf ("Grabbing keycode %d (usually %s) with CTRL + SHIFT modifiers\n",
             ExitCtrlKC, "g");
 
-    if (grabKey (dpy, root, ExitCtrlKC, nKbds, kbds, nMods, modifiers)
+    if (grabKeyCtrl (&ctx, root, ExitCtrlKC, kbds, nMods, modifiers, True)
         == False)
     {
-        ungrabKey (dpy, root, TransCtrlKC, nKbds, kbds, nMods, modifiers);
+        grabKeyCtrl (&ctx, root, TransCtrlKC, kbds, nMods, modifiers, False);
+        free (kbds->devs);
         free (kbds);
-        XCloseDisplay (dpy);
+        XCloseDisplay (ctx.xDpy);
         return EXIT_FAILURE;
     }
     /**************************************************************************/
@@ -238,20 +382,20 @@ main (void)
 
     while (stop == 0)
     {
-        cookie = &ev.xcookie;
-        XNextEvent (dpy, &ev);
+        cookie = & ev.xcookie;
+        XNextEvent (ctx.xDpy, &ev);
 
-        if (   cookie->type                != GenericEvent
-            || cookie->extension           != xiOp
-            || XGetEventData (dpy, cookie) == 0)
+        if (   cookie->type                     != GenericEvent
+            || cookie->extension                != ctx.xiOp
+            || XGetEventData (ctx.xDpy, cookie) == 0)
         {
             continue;
         }
 
         xide = (XIDeviceEvent*) ev.xcookie.data;
 
-        keysym = XGetKeyboardMapping (dpy, xide->detail, 1, &keysym_count);
-        kc = XKeysymToKeycode (dpy, *keysym);
+        keysym = XGetKeyboardMapping (ctx.xDpy, xide->detail, 1, &keysym_count);
+        kc = XKeysymToKeycode (ctx.xDpy, *keysym);
         XFree (keysym);
 
         if (kc == TransCtrlKC && cookie->evtype == XI_KeyRelease)
@@ -265,18 +409,18 @@ main (void)
             stop = 1;
         }
 
-        XFreeEventData (dpy, cookie);
+        XFreeEventData (ctx.xDpy, cookie);
     }
     /**************************************************************************/
 
 
-    ungrabKey (dpy, root, TransCtrlKC, nKbds, kbds, nMods, modifiers);
-    ungrabKey (dpy, root, ExitCtrlKC, nKbds, kbds, nMods, modifiers);
+    grabKeyCtrl (&ctx, root, TransCtrlKC, kbds, nMods, modifiers, False);
+    grabKeyCtrl (&ctx, root, ExitCtrlKC, kbds, nMods, modifiers, False);
 
-    XCloseDisplay (dpy);
+    XCloseDisplay (ctx.xDpy);
 
+    free (kbds->devs);
     free (kbds);
 
     return EXIT_SUCCESS;
 }
-
